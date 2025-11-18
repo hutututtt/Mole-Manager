@@ -29,3 +29,17 @@ jobs:
 
       - name: Build Universal Binary for disk analyzer
         run: ./scripts/build-analyze.sh
+
+      - name: Commit analyzer binary if updated
+        if: github.event_name != 'pull_request'
+        run: |
+          if git diff --quiet -- bin/analyze-go; then
+            echo "bin/analyze-go unchanged; nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin/analyze-go
+          git commit -m "chore: update analyzer binary"
+          git push origin HEAD:${GITHUB_REF#refs/heads/}
