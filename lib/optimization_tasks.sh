@@ -35,9 +35,10 @@ opt_system_maintenance() {
         echo -e "${RED}${ICON_ERROR}${NC} Failed to clear memory"
     fi
 
-    echo -e "${BLUE}${ICON_ARROW}${NC} Rebuilding font cache..."
-    sudo atsutil databases -remove > /dev/null 2>&1
-    echo -e "${GREEN}${ICON_SUCCESS}${NC} Font cache rebuilt"
+    # Skip: Font cache rebuild breaks ScreenSaverEngine and other system components
+    # echo -e "${BLUE}${ICON_ARROW}${NC} Rebuilding font cache..."
+    # sudo atsutil databases -remove > /dev/null 2>&1
+    # echo -e "${GREEN}${ICON_SUCCESS}${NC} Font cache rebuilt"
 
     echo -e "${BLUE}${ICON_ARROW}${NC} Rebuilding Spotlight index (runs in background)..."
     local md_status
@@ -54,16 +55,18 @@ opt_system_maintenance() {
     sudo pkill -f blued 2> /dev/null || true
     echo -e "${GREEN}${ICON_SUCCESS}${NC} Bluetooth controller refreshed"
 
-    if command -v log > /dev/null 2>&1 && [[ "${MO_ENABLE_LOG_CLEANUP:-0}" == "1" ]]; then
-        echo -e "${BLUE}${ICON_ARROW}${NC} Compressing system logs..."
-        if command -v has_sudo_session > /dev/null 2>&1 && ! has_sudo_session; then
-            echo -e "${YELLOW}!${NC} Skipped log compression ${GRAY}(admin session inactive)${NC}"
-        elif run_with_timeout 15 sudo -n log erase --all --force > /dev/null 2>&1; then
-            echo -e "${GREEN}${ICON_SUCCESS}${NC} logarchive trimmed"
-        else
-            echo -e "${YELLOW}!${NC} Skipped log compression ${GRAY}(requires Full Disk Access)${NC}"
-        fi
-    fi
+    # Skip: log erase --all --force deletes ALL system logs, making debugging impossible
+    # Users should manually manage logs if needed using: sudo log erase --all --force
+    # if command -v log > /dev/null 2>&1 && [[ "${MO_ENABLE_LOG_CLEANUP:-0}" == "1" ]]; then
+    #     echo -e "${BLUE}${ICON_ARROW}${NC} Compressing system logs..."
+    #     if command -v has_sudo_session > /dev/null 2>&1 && ! has_sudo_session; then
+    #         echo -e "${YELLOW}!${NC} Skipped log compression ${GRAY}(admin session inactive)${NC}"
+    #     elif run_with_timeout 15 sudo -n log erase --all --force > /dev/null 2>&1; then
+    #         echo -e "${GREEN}${ICON_SUCCESS}${NC} logarchive trimmed"
+    #     else
+    #         echo -e "${YELLOW}!${NC} Skipped log compression ${GRAY}(requires Full Disk Access)${NC}"
+    #     fi
+    # fi
 }
 
 # Cache refresh: update Finder/Safari caches
@@ -165,39 +168,46 @@ opt_recent_items() {
     echo -e "${GREEN}${ICON_SUCCESS}${NC} Recent items cleared"
 }
 
-# Radio refresh: reset Bluetooth and Wi-Fi
+# Radio refresh: reset Bluetooth and Wi-Fi (safe mode - no pairing/password loss)
 opt_radio_refresh() {
-    echo -e "${BLUE}${ICON_ARROW}${NC} Resetting Bluetooth preferences..."
-    rm -f "$HOME/Library/Preferences/com.apple.Bluetooth.plist" 2> /dev/null || true
-    sudo rm -f /Library/Preferences/com.apple.Bluetooth.plist 2> /dev/null || true
-    echo -e "${GREEN}${ICON_SUCCESS}${NC} Bluetooth caches refreshed"
+    echo -e "${BLUE}${ICON_ARROW}${NC} Refreshing Bluetooth controller..."
+    # Only restart Bluetooth service, do NOT delete pairing information
+    sudo pkill -HUP bluetoothd 2> /dev/null || true
+    echo -e "${GREEN}${ICON_SUCCESS}${NC} Bluetooth controller refreshed"
 
-    echo -e "${BLUE}${ICON_ARROW}${NC} Resetting Wi-Fi settings..."
-    local sysconfig="/Library/Preferences/SystemConfiguration"
-    if [[ -d "$sysconfig" ]]; then
-        sudo cp "$sysconfig"/com.apple.airport.preferences.plist "$sysconfig"/com.apple.airport.preferences.plist.bak 2> /dev/null || true
-        sudo rm -f "$sysconfig"/com.apple.airport.preferences.plist 2> /dev/null || true
-        echo -e "${GREEN}${ICON_SUCCESS}${NC} Wi-Fi preferences reset"
+    echo -e "${BLUE}${ICON_ARROW}${NC} Refreshing Wi-Fi service..."
+    # Only restart Wi-Fi service, do NOT delete saved networks
+    # Skip: Deleting airport.preferences.plist causes all saved Wi-Fi passwords to be lost
+    # sudo rm -f "$sysconfig"/com.apple.airport.preferences.plist
+
+    # Safe alternative: just restart the Wi-Fi interface
+    local wifi_interface
+    wifi_interface=$(networksetup -listallhardwareports | awk '/Wi-Fi/{getline; print $2}' | head -1)
+    if [[ -n "$wifi_interface" ]]; then
+        sudo ifconfig "$wifi_interface" down 2> /dev/null || true
+        sleep 1
+        sudo ifconfig "$wifi_interface" up 2> /dev/null || true
+        echo -e "${GREEN}${ICON_SUCCESS}${NC} Wi-Fi interface restarted"
     else
-        echo -e "${GRAY}-${NC} SystemConfiguration directory missing"
+        echo -e "${GRAY}-${NC} Wi-Fi interface not found"
     fi
 
+    # Restart AirDrop interface
     sudo ifconfig awdl0 down 2> /dev/null || true
     sudo ifconfig awdl0 up 2> /dev/null || true
     echo -e "${GREEN}${ICON_SUCCESS}${NC} Wireless services refreshed"
 }
 
-# Mail downloads: clear Mail attachment cache
+# Mail downloads: clear OLD Mail attachment cache (30+ days)
 opt_mail_downloads() {
-    echo -e "${BLUE}${ICON_ARROW}${NC} Clearing Mail attachment downloads..."
+    echo -e "${BLUE}${ICON_ARROW}${NC} Clearing old Mail attachment downloads (30+ days)..."
     local -a mail_dirs=(
-        "$HOME/Library/Mail Downloads|Mail Downloads"
-        "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads|Mail Container Downloads"
+        "$HOME/Library/Mail Downloads"
+        "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
     )
 
     local total_kb=0
-    for target in "${mail_dirs[@]}"; do
-        IFS='|' read -r target_path _ <<< "$target"
+    for target_path in "${mail_dirs[@]}"; do
         total_kb=$((total_kb + $(_opt_get_dir_size_kb "$target_path")))
     done
 
@@ -206,21 +216,40 @@ opt_mail_downloads() {
         return
     fi
 
-    for target in "${mail_dirs[@]}"; do
-        IFS='|' read -r target_path label <<< "$target"
-        cleanup_path "$target_path" "$label"
-        ensure_directory "$target_path"
+    # Only delete files older than 30 days (safer)
+    local deleted=0
+    for target_path in "${mail_dirs[@]}"; do
+        if [[ -d "$target_path" ]]; then
+            deleted=$((deleted + $(find "$target_path" -type f -mtime +30 -delete -print 2>/dev/null | wc -l | tr -d ' ')))
+        fi
     done
-    echo -e "${GREEN}${ICON_SUCCESS}${NC} Mail downloads cleared"
+
+    if [[ $deleted -gt 0 ]]; then
+        echo -e "${GREEN}${ICON_SUCCESS}${NC} Removed $deleted old attachment(s)"
+    else
+        echo -e "${GRAY}-${NC} No old attachments found"
+    fi
 }
 
-# Saved state: remove app saved states
+# Saved state: remove OLD app saved states (7+ days)
 opt_saved_state_cleanup() {
-    echo -e "${BLUE}${ICON_ARROW}${NC} Removing saved application states..."
+    echo -e "${BLUE}${ICON_ARROW}${NC} Removing old saved application states (7+ days)..."
     local state_dir="$HOME/Library/Saved Application State"
-    cleanup_path "$state_dir" "Saved Application State"
-    ensure_directory "$state_dir"
-    echo -e "${GREEN}${ICON_SUCCESS}${NC} Saved states cleared"
+
+    if [[ ! -d "$state_dir" ]]; then
+        echo -e "${GRAY}-${NC} No saved states directory found"
+        return
+    fi
+
+    # Only delete states older than 7 days (safer - won't lose recent work)
+    local deleted=0
+    deleted=$(find "$state_dir" -type d -name "*.savedState" -mtime +7 -exec rm -rf {} \; -print 2>/dev/null | wc -l | tr -d ' ')
+
+    if [[ $deleted -gt 0 ]]; then
+        echo -e "${GREEN}${ICON_SUCCESS}${NC} Removed $deleted old saved state(s)"
+    else
+        echo -e "${GRAY}-${NC} No old saved states found"
+    fi
 }
 
 # Finder and Dock: refresh interface caches
@@ -234,6 +263,11 @@ opt_finder_dock_refresh() {
         IFS='|' read -r target_path label <<< "$target"
         cleanup_path "$target_path" "$label"
     done
+
+    # Warn user before restarting Finder (may lose unsaved work)
+    echo -e "${YELLOW}${ICON_WARNING}${NC} About to restart Finder & Dock (save any work in Finder windows)"
+    sleep 2
+
     killall Finder > /dev/null 2>&1 || true
     killall Dock > /dev/null 2>&1 || true
     echo -e "${GREEN}${ICON_SUCCESS}${NC} Finder & Dock relaunched"
@@ -272,7 +306,8 @@ opt_startup_cache() {
             success=false
         fi
 
-        sudo rm -rf /System/Library/PrelinkedKernels/* > /dev/null 2>&1 || true
+        # Skip: Deleting PrelinkedKernels breaks ScreenSaverEngine and other system components
+        # sudo rm -rf /System/Library/PrelinkedKernels/* > /dev/null 2>&1 || true
         run_with_timeout 120 sudo kextcache -system-prelinked-kernel > /dev/null 2>&1 || true
     fi
 
