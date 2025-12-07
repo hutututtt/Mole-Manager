@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -163,8 +162,8 @@ func buildCards(m MetricsSnapshot, _ int) []cardData {
 		renderProcessCard(m.TopProcesses),
 		renderNetworkCard(m.Network, m.Proxy),
 	}
-	// Only show GPU card if there are GPUs with usage data
-	if len(m.GPU) > 0 && m.GPU[0].Usage >= 0 {
+	// Only show GPU card if there are GPUs with usage data or core count
+	if len(m.GPU) > 0 && (m.GPU[0].Usage >= 0 || m.GPU[0].CoreCount > 0) {
 		cards = append(cards, renderGPUCard(m.GPU))
 	}
 	// Only show sensors if we have valid temperature readings
@@ -186,29 +185,36 @@ func hasSensorData(sensors []SensorReading) bool {
 func renderCPUCard(cpu CPUStatus) cardData {
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Total  %s  %5.1f%%", progressBar(cpu.Usage), cpu.Usage))
-	lines = append(lines, subtleStyle.Render(fmt.Sprintf("%.2f / %.2f / %.2f  (%d cores)", cpu.Load1, cpu.Load5, cpu.Load15, cpu.LogicalCPU)))
+
+	// Show core topology info if available (Apple Silicon)
+	if cpu.PCoreCount > 0 && cpu.ECoreCount > 0 {
+		lines = append(lines, subtleStyle.Render(fmt.Sprintf("%.2f / %.2f / %.2f  (%dP + %dE cores)",
+			cpu.Load1, cpu.Load5, cpu.Load15, cpu.PCoreCount, cpu.ECoreCount)))
+	} else {
+		lines = append(lines, subtleStyle.Render(fmt.Sprintf("%.2f / %.2f / %.2f  (%d cores)",
+			cpu.Load1, cpu.Load5, cpu.Load15, cpu.LogicalCPU)))
+	}
 
 	if cpu.PerCoreEstimated {
 		lines = append(lines, subtleStyle.Render("Per-core data unavailable (using averaged load)"))
 	} else if len(cpu.PerCore) > 0 {
-		// Show top 3 busiest cores
-		type coreUsage struct {
-			idx int
-			val float64
-		}
-		var cores []coreUsage
-		for i, v := range cpu.PerCore {
-			cores = append(cores, coreUsage{i, v})
-		}
-		sort.Slice(cores, func(i, j int) bool { return cores[i].val > cores[j].val })
-
-		maxCores := 3
-		if len(cores) < maxCores {
-			maxCores = len(cores)
-		}
-		for i := 0; i < maxCores; i++ {
-			c := cores[i]
-			lines = append(lines, fmt.Sprintf("Core%-2d %s  %5.1f%%", c.idx+1, progressBar(c.val), c.val))
+		// Apple Silicon: Group cores into P-CPU and E-CPU
+		if cpu.PCoreCount > 0 && cpu.ECoreCount > 0 {
+			// P-cores (Performance) come first
+			lines = append(lines, titleStyle.Render("P-CPU"))
+			for i := 0; i < cpu.PCoreCount && i < len(cpu.PerCore); i++ {
+				lines = append(lines, fmt.Sprintf("Core%-2d %s  %5.1f%%", i+1, progressBar(cpu.PerCore[i]), cpu.PerCore[i]))
+			}
+			// E-cores (Efficiency) come after P-cores
+			lines = append(lines, titleStyle.Render("E-CPU"))
+			for i := cpu.PCoreCount; i < cpu.PCoreCount+cpu.ECoreCount && i < len(cpu.PerCore); i++ {
+				lines = append(lines, fmt.Sprintf("Core%-2d %s  %5.1f%%", i+1, progressBar(cpu.PerCore[i]), cpu.PerCore[i]))
+			}
+		} else {
+			// Non-Apple Silicon: Show all cores without grouping
+			for i, v := range cpu.PerCore {
+				lines = append(lines, fmt.Sprintf("Core%-2d %s  %5.1f%%", i+1, progressBar(v), v))
+			}
 		}
 	}
 
@@ -221,11 +227,19 @@ func renderGPUCard(gpus []GPUStatus) cardData {
 		lines = append(lines, subtleStyle.Render("No GPU detected"))
 	} else {
 		for _, g := range gpus {
-			name := shorten(g.Name, 12)
+			// Line 1: Usage bar (if available)
 			if g.Usage >= 0 {
-				lines = append(lines, fmt.Sprintf("%-12s  %s  %5.1f%%", name, progressBar(g.Usage), g.Usage))
-			} else {
-				lines = append(lines, name)
+				lines = append(lines, fmt.Sprintf("Total  %s  %5.1f%%", progressBar(g.Usage), g.Usage))
+			}
+			// Line 2: GPU name and core count
+			coreInfo := ""
+			if g.CoreCount > 0 {
+				coreInfo = fmt.Sprintf("  (%d cores)", g.CoreCount)
+			}
+			lines = append(lines, subtleStyle.Render(g.Name+coreInfo))
+			// Line 3: Hint for sudo if usage unavailable
+			if g.Usage < 0 {
+				lines = append(lines, subtleStyle.Render("Run with sudo for usage metrics"))
 			}
 		}
 	}

@@ -63,6 +63,8 @@ type CPUStatus struct {
 	Load15           float64
 	CoreCount        int
 	LogicalCPU       int
+	PCoreCount       int // Performance cores (Apple Silicon)
+	ECoreCount       int // Efficiency cores (Apple Silicon)
 }
 
 type GPUStatus struct {
@@ -70,6 +72,7 @@ type GPUStatus struct {
 	Usage       float64
 	MemoryUsed  float64
 	MemoryTotal float64
+	CoreCount   int
 	Note        string
 }
 

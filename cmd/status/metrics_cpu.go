@@ -63,6 +63,9 @@ func collectCPU() (CPUStatus, error) {
 		}
 	}
 
+	// Get P-core and E-core counts for Apple Silicon
+	pCores, eCores := getCoreTopology()
+
 	return CPUStatus{
 		Usage:            totalPercent,
 		PerCore:          percents,
@@ -72,11 +75,62 @@ func collectCPU() (CPUStatus, error) {
 		Load15:           loadAvg.Load15,
 		CoreCount:        counts,
 		LogicalCPU:       logical,
+		PCoreCount:       pCores,
+		ECoreCount:       eCores,
 	}, nil
 }
 
 func isZeroLoad(avg load.AvgStat) bool {
 	return avg.Load1 == 0 && avg.Load5 == 0 && avg.Load15 == 0
+}
+
+// getCoreTopology returns P-core and E-core counts on Apple Silicon.
+// Returns (0, 0) on non-Apple Silicon or if detection fails.
+func getCoreTopology() (pCores, eCores int) {
+	if runtime.GOOS != "darwin" {
+		return 0, 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Get performance level info from sysctl
+	out, err := runCmd(ctx, "sysctl", "-n",
+		"hw.perflevel0.logicalcpu",
+		"hw.perflevel0.name",
+		"hw.perflevel1.logicalcpu",
+		"hw.perflevel1.name")
+	if err != nil {
+		return 0, 0
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 4 {
+		return 0, 0
+	}
+
+	// Parse perflevel0
+	level0Count, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
+	level0Name := strings.ToLower(strings.TrimSpace(lines[1]))
+
+	// Parse perflevel1
+	level1Count, _ := strconv.Atoi(strings.TrimSpace(lines[2]))
+	level1Name := strings.ToLower(strings.TrimSpace(lines[3]))
+
+	// Assign based on name (Performance vs Efficiency)
+	if strings.Contains(level0Name, "performance") {
+		pCores = level0Count
+	} else if strings.Contains(level0Name, "efficiency") {
+		eCores = level0Count
+	}
+
+	if strings.Contains(level1Name, "performance") {
+		pCores = level1Count
+	} else if strings.Contains(level1Name, "efficiency") {
+		eCores = level1Count
+	}
+
+	return pCores, eCores
 }
 
 func fallbackLoadAvgFromUptime() (load.AvgStat, error) {
