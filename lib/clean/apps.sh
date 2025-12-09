@@ -89,8 +89,6 @@ clean_orphaned_app_data() {
     # Build list of installed/active apps
     local installed_bundles=$(create_temp_file)
 
-    MOLE_SPINNER_PREFIX="  " start_inline_spinner "Scanning installed apps..."
-
     # Scan all Applications directories
     local -a app_dirs=(
         "/Applications"
@@ -101,16 +99,42 @@ clean_orphaned_app_data() {
     # Create a temp dir for parallel results to avoid write contention
     local scan_tmp_dir=$(create_temp_dir)
 
-    # Parallel scan for applications
+    # Start progress indicator with real-time count
+    local progress_count_file="$scan_tmp_dir/progress_count"
+    echo "0" > "$progress_count_file"
+
+    # Background spinner that shows live progress
+    (
+        trap 'exit 0' TERM INT EXIT
+        local spinner_chars="|/-\\"
+        local i=0
+        while true; do
+            local count=$(cat "$progress_count_file" 2>/dev/null || echo "0")
+            local c="${spinner_chars:$((i % 4)):1}"
+            echo -ne "\r\033[K  $c Scanning installed apps... $count found" >&2
+            ((i++))
+            sleep 0.2 2>/dev/null || sleep 1
+        done
+    ) &
+    local spinner_pid=$!
+
+    # Parallel scan for applications with increased timeout for large app directories
     local pids=()
     local dir_idx=0
     for app_dir in "${app_dirs[@]}"; do
         [[ -d "$app_dir" ]] || continue
         (
-            run_with_timeout 10 sh -c "find '$app_dir' -name '*.app' -maxdepth 3 -type d 2> /dev/null" | while IFS= read -r app_path; do
+            # Increased timeout to 30s to handle large app directories (especially /System/Applications)
+            # Timeout errors are suppressed to prevent confusing output
+            run_with_timeout 30 sh -c "find '$app_dir' -name '*.app' -maxdepth 3 -type d 2> /dev/null" 2> /dev/null | while IFS= read -r app_path; do
                 local bundle_id
                 bundle_id=$(defaults read "$app_path/Contents/Info.plist" CFBundleIdentifier 2> /dev/null || echo "")
-                [[ -n "$bundle_id" ]] && echo "$bundle_id"
+                if [[ -n "$bundle_id" ]]; then
+                    echo "$bundle_id"
+                    # Update progress count atomically
+                    local current_count=$(cat "$progress_count_file" 2>/dev/null || echo "0")
+                    echo "$((current_count + 1))" > "$progress_count_file"
+                fi
             done > "$scan_tmp_dir/apps_${dir_idx}.txt"
         ) &
         pids+=($!)
@@ -136,6 +160,11 @@ clean_orphaned_app_data() {
         wait "$pid" 2> /dev/null || true
     done
 
+    # Stop the spinner
+    kill -TERM "$spinner_pid" 2>/dev/null || true
+    wait "$spinner_pid" 2>/dev/null || true
+    echo -ne "\r\033[K" >&2
+
     # Merge all results
     cat "$scan_tmp_dir"/*.txt >> "$installed_bundles" 2> /dev/null || true
     safe_remove "$scan_tmp_dir" true
@@ -144,7 +173,6 @@ clean_orphaned_app_data() {
     sort -u "$installed_bundles" -o "$installed_bundles"
 
     local app_count=$(wc -l < "$installed_bundles" 2> /dev/null | tr -d ' ')
-    stop_inline_spinner
     echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Found $app_count active/installed apps"
 
     # Track statistics
