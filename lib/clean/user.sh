@@ -97,7 +97,26 @@ clean_sandboxed_app_caches() {
     safe_clean ~/Library/Containers/com.apple.mediaanalysisd/Data/Library/Caches/* "Media analysis cache"
     safe_clean ~/Library/Containers/com.apple.AppStore/Data/Library/Caches/* "App Store cache"
     safe_clean ~/Library/Containers/com.apple.configurator.xpc.InternetService/Data/tmp/* "Apple Configurator temp files"
-    safe_clean ~/Library/Containers/*/Data/Library/Caches/* "Sandboxed app caches"
+
+    # Clean sandboxed app caches - iterate to avoid shell expansion hang
+    # Check container protection BEFORE expanding cache files to prevent
+    # redundant protection checks on each file (Issue #116)
+    local containers_dir="$HOME/Library/Containers"
+    [[ ! -d "$containers_dir" ]] && return 0
+
+    for container_dir in "$containers_dir"/*; do
+        [[ -d "$container_dir" ]] || continue
+
+        # Extract bundle ID and check protection status early
+        local bundle_id=$(basename "$container_dir")
+        if should_protect_data "$bundle_id"; then
+            debug_log "Protecting system container: $bundle_id"
+            continue
+        fi
+
+        local cache_dir="$container_dir/Data/Library/Caches"
+        [[ -d "$cache_dir" ]] && safe_clean "$cache_dir"/* "Sandboxed app caches"
+    done
 }
 
 # Clean browser caches (Safari, Chrome, Edge, Firefox, etc.)
@@ -166,19 +185,9 @@ clean_application_support_logs() {
         return 0
     fi
 
-    # Clean log directories and cache patterns with iteration limit
-    # Reduced from 200 to 50 to prevent hanging on large directories
-    local iteration_count=0
-    local max_iterations=50
-
+    # Clean log directories and cache patterns
     for app_dir in ~/Library/Application\ Support/*; do
         [[ -d "$app_dir" ]] || continue
-
-        # Safety: limit iterations
-        ((iteration_count++))
-        if [[ $iteration_count -gt $max_iterations ]]; then
-            break
-        fi
 
         app_name=$(basename "$app_dir")
 

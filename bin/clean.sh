@@ -323,6 +323,11 @@ safe_clean() {
                 read -r size count < "$result_file" 2> /dev/null || true
                 if [[ "$count" -gt 0 && "$size" -gt 0 ]]; then
                     if [[ "$DRY_RUN" != "true" ]]; then
+                        # Update spinner to show cleaning progress
+                        if [[ -t 1 ]] && ((idx % 5 == 0)); then
+                            stop_inline_spinner
+                            MOLE_SPINNER_PREFIX="  " start_inline_spinner "Cleaning items ($idx/$total_paths)..."
+                        fi
                         # Handle symbolic links separately (only remove the link, not the target)
                         if [[ -L "$path" ]]; then
                             rm "$path" 2> /dev/null || true
@@ -344,6 +349,7 @@ safe_clean() {
         local total_paths=${#existing_paths[@]}
         if [[ -t 1 ]]; then MOLE_SPINNER_PREFIX="  " start_inline_spinner "Scanning $total_paths items..."; fi
 
+        local idx=0
         for path in "${existing_paths[@]}"; do
             local size_bytes
             size_bytes=$(get_path_size_kb "$path")
@@ -351,6 +357,11 @@ safe_clean() {
             # Optimization: Skip expensive file counting
             if [[ "$size_bytes" -gt 0 ]]; then
                 if [[ "$DRY_RUN" != "true" ]]; then
+                    # Update spinner to show cleaning progress for slow operations
+                    if [[ -t 1 ]]; then
+                        stop_inline_spinner
+                        MOLE_SPINNER_PREFIX="  " start_inline_spinner "Cleaning $description..."
+                    fi
                     # Handle symbolic links separately (only remove the link, not the target)
                     if [[ -L "$path" ]]; then
                         rm "$path" 2> /dev/null || true
@@ -362,6 +373,7 @@ safe_clean() {
                 ((total_count += 1))
                 removed_any=1
             fi
+            ((idx++))
         done
     fi
 
